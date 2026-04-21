@@ -1,0 +1,16 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: grader-primes
+spec:
+  template:
+    spec:
+      containers:
+      - name: grader-primes
+        image: local-grader-primes:latest
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "256Mi"
+      restartPolicy: Never

@@ -1,0 +1,16 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: grader-sort
+spec:
+  template:
+    spec:
+      containers:
+      - name: grader
+        image: local-grader-sort:latest
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "128Mi"
+      restartPolicy: Never
