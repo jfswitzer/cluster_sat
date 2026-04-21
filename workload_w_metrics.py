@@ -3,9 +3,14 @@ import yaml
 import time
 import json
 from collections import defaultdict
+import sys
 
 # --- Configuration ---
-CONCURRENCY_TARGET = 40  # Jobs to keep active across 20 nodes
+if len(sys.argv)>1:
+    CONCURRENCY_TARGET=sys.argv[2]
+else:
+    CONCURRENCY_TARGET=40
+
 TEST_DURATION = 300      # Test duration in seconds
 APP_TYPES = ["sort", "primes", "matrix"]
 NAMESPACE = "default"
