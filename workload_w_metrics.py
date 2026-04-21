@@ -7,7 +7,7 @@ import sys
 
 # --- Configuration ---
 if len(sys.argv)>1:
-    CONCURRENCY_TARGET=sys.argv[2]
+    CONCURRENCY_TARGET=sys.argv[1]
 else:
     CONCURRENCY_TARGET=40
 
