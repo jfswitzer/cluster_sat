@@ -1,2 +1,4 @@
 example_apps/build*
 *tar.gz
+*tar
+example_apps/images/

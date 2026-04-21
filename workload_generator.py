@@ -7,8 +7,8 @@ import json
 # --- Configuration ---
 MANIFESTS_FOLDER = "./example_apps"  # Your folder of .yaml or .json files
 NAMESPACE = "load-test-env"
-WAVE_SIZE = 10                       # How many jobs to add per wave
-COOLDOWN_SECONDS = 30                # Wait for scheduler to react
+WAVE_SIZE = 20                       # How many jobs to add per wave
+COOLDOWN_SECONDS = 1                # Wait for scheduler to react
 MAX_PENDING_THRESHOLD = 5            # Stop if more than 5 pods are stuck Pending
 TARGET_ARCH = "arm64"                # Force targeting ARM nodes
 
