@@ -1,14 +1,19 @@
 #!/bin/bash
 
 # --- Configuration ---
-# CHANGE THIS to your actual container registry (e.g., "docker.io/username" or "ghcr.io/username")
-REGISTRY="10.0.0.1:30500"
+# Set REGISTRY to the Node IP and Port 30500 from your local-registry.yaml
+# Use any node IP in your cluster or 127.0.0.1 if building on a cluster node.
+REGISTRY="10.0.0.1:30500" 
 PLATFORM="linux/arm64"
+NAMESPACE="k8s.io" # Standard namespace for K3s/containerd images
 
-# Ensure we have a buildx instance that supports multi-arch
-docker buildx create --use --name arm-builder 2>/dev/null || docker buildx use arm-builder
+# Verify nerdctl is installed
+if ! command -v nerdctl &> /dev/null; then
+    echo "Error: nerdctl not found. Please install nerdctl and buildkitd."
+    exit 1
+fi
 
-echo "--- Starting Build Process for ARM64 Images ---"
+echo "--- Starting Build Process for ARM64 Images (containerd/nerdctl) ---"
 
 # Function to create and build an app
 build_app() {
@@ -29,18 +34,29 @@ COPY submission.py .
 ENTRYPOINT ["python", "grader.py"]
 EOF
 
-    # Write Grader and Submission
+    # Write Grader and Submission files
     echo "$grader_content" > "build_$app_name/grader.py"
     echo "$submission_content" > "build_$app_name/submission.py"
 
-    echo "[*] Building and Pushing $image_tag..."
-    docker buildx build --platform "$PLATFORM" -t "$image_tag" "build_$app_name" --push
+    echo "[*] Building $image_tag..."
+    # nerdctl build requires buildkitd to be running.
+    # We specify the namespace so images are visible to the K3s runtime.
+    sudo nerdctl -n "$NAMESPACE" build \
+        --platform "$PLATFORM" \
+        -t "$image_tag" \
+        "build_$app_name"
+
+    echo "[*] Pushing to insecure registry at $REGISTRY..."
+    # We must explicitly allow the insecure (HTTP) registry for the local NodePort
+    sudo nerdctl -n "$NAMESPACE" push "$image_tag" --insecure-registry
 
     echo "[+] Done with $app_name"
     echo "-----------------------------------"
 }
 
-# --- APP 1: SORT (Light) ---
+# --- Workload Logic ---
+
+# APP 1: SORT (Light)
 SORT_GRADER=$(cat <<'EOF'
 import time, random, submission
 def test_sorting():
@@ -55,7 +71,7 @@ EOF
 )
 SORT_SUBMISSION="def student_sort(arr): return sorted(arr)"
 
-# --- APP 2: PRIMES (Medium) ---
+# APP 2: PRIMES (Medium)
 PRIME_GRADER=$(cat <<'EOF'
 import time, submission
 def test_primes():
@@ -77,7 +93,7 @@ def find_primes(n):
 EOF
 )
 
-# --- APP 3: MATRIX (Heavy) ---
+# APP 3: MATRIX (Heavy)
 MATRIX_GRADER=$(cat <<'EOF'
 import time, random, submission
 def test_matrix():
@@ -109,5 +125,4 @@ build_app "sort" "$SORT_GRADER" "$SORT_SUBMISSION"
 build_app "primes" "$PRIME_GRADER" "$PRIME_SUBMISSION"
 build_app "matrix" "$MATRIX_GRADER" "$MATRIX_SUBMISSION"
 
-echo "!!! All images built and pushed for ARM64 !!!"
-echo "Remember to update your Kubernetes YAMLs with the new image tags."
+echo "!!! All images built and pushed for ARM64 via nerdctl !!!"
