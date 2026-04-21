@@ -1,0 +1,53 @@
+# These are the files you would place in your ./example_apps folder.
+# The k8s_saturator.py script will read these and inject the arm64 affinity.
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: grader-sort
+spec:
+  template:
+    spec:
+      containers:
+      - name: grader
+        image: your-repo/grader-sort:latest
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "128Mi"
+      restartPolicy: Never
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: grader-primes
+spec:
+  template:
+    spec:
+      containers:
+      - name: grader
+        image: your-repo/grader-primes:latest
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "256Mi"
+      restartPolicy: Never
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: grader-matrix
+spec:
+  template:
+    spec:
+      containers:
+      - name: grader
+        image: your-repo/grader-matrix:latest
+        resources:
+          requests:
+            cpu: "1000m"
+            memory: "512Mi"
+      restartPolicy: Never
