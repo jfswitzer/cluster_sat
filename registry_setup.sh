@@ -2,7 +2,7 @@
 
 # --- Configuration ---
 HOSTS_FILE="ips.txt"
-USERNAME="luffy"
+USERNAME="kalm"
 REGISTRY_IP="10.0.0.1"   # CHANGE THIS to your Registry Node's IP
 REGISTRY_PORT="30500"
 
