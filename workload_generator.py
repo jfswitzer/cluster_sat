@@ -1,125 +1,161 @@
-import subprocess
-import os
 import time
-import yaml
-import json
-
+import os
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from kubernetes import client, config
+from kubernetes.client.rest import ApiException
+import subprocess
+import sys
 # --- Configuration ---
-MANIFESTS_FOLDER = "./example_apps"  # Your folder of .yaml or .json files
-NAMESPACE = "load-test-env"
-WAVE_SIZE = 20                       # How many jobs to add per wave
-COOLDOWN_SECONDS = 1                # Wait for scheduler to react
-MAX_PENDING_THRESHOLD = 5            # Stop if more than 5 pods are stuck Pending
-TARGET_ARCH = "arm64"                # Force targeting ARM nodes
+if len(sys.argv)>1:
+    CONCURRENCY_TARGET = int(sys.argv[1])  # Number of jobs to keep active
+else:
+    CONCURRENCY_TARGET = 80
+TEST_DURATION = 300       # Seconds
+#APP_TYPES = ["sort", "primes", "matrix"]
+APP_TYPES=["matrix"]
+SUBMISSION_WORKERS = 20   # Maximum parallel API calls
 
-def run_command(cmd):
-    """Executes a shell command and returns the output."""
-    result = subprocess.run(cmd, capture_output=True, text=True, shell=True)
-    if result.returncode != 0:
-        print(f"Error: {result.stderr}")
-        return None
-    return result.stdout
+def load_kubernetes_config():
+    try:
+        config.load_kube_config()
+    except Exception:
+        k3s_config = "/etc/rancher/k3s/k3s.yaml"
+        if os.path.exists(k3s_config):
+            config.load_kube_config(config_file=k3s_config)
+        else:
+            print("Error: No Kubeconfig found. Try: export KUBECONFIG=/etc/rancher/k3s/k3s.yaml")
+            exit(1)
 
-def get_cluster_status():
-    """Checks for Pending pods, Node pressure, and Architecture mismatches."""
-    pod_data = run_command(f"kubectl get pods -n {NAMESPACE} -o json")
-    if not pod_data: return True, 0, 0
+load_kubernetes_config()
+batch_v1 = client.BatchV1Api()
+
+# Metrics storage
+metrics = {
+    "total_completed": 0, 
+    "latencies": defaultdict(list), 
+    "errors": 0, 
+    "start_time": None
+}
+active_jobs = {} # name -> (start_t, app_t)
+
+def get_job_object(app_type, job_id):
+    """Creates a minimal Job object to reduce API/DB overhead."""
+    container = client.V1Container(
+        name="grader",
+        image=f"docker.io/library/local-grader-matrix:latest",
+        image_pull_policy="IfNotPresent",
+    )
+    template = client.V1PodTemplateSpec(
+        metadata=client.V1ObjectMeta(labels={"app": "bench"}),
+        spec=client.V1PodSpec(
+            node_selector={"usage": "subset"},
+            restart_policy="Never", 
+            containers=[container],
+            automount_service_account_token=False 
+        )
+    )
+    return client.V1Job(
+        api_version="batch/v1",
+        kind="Job",
+        metadata=client.V1ObjectMeta(name=f"b-{job_id}", labels={"benchmark": "active"}),
+        spec=client.V1JobSpec(template=template, backoff_limit=0, ttl_seconds_after_finished=60)
+    )
+
+def submit_job_task(app_type):
+    """Submits a single job to the API."""
+    job_id = int(time.time() * 1000000) % 10000000
+    job_obj = get_job_object(app_type, job_id)
+    start_t = time.time()
+    try:
+        batch_v1.create_namespaced_job(namespace="default", body=job_obj)
+        return f"b-{job_id}", start_t, app_type
+    except Exception:
+        return None, None, None
+
+def monitor_and_measure():
+    print(f"--- Decoupled Parallel Benchmark: Target={CONCURRENCY_TARGET} ---")
+    metrics["start_time"] = time.time()
     
-    pods = json.loads(pod_data).get('items', [])
-    pending_count = sum(1 for p in pods if p.get('status', {}).get('phase') == 'Pending')
-    
-    # Check for Error states (often 'Exec format error' on ARM)
-    error_count = 0
-    for p in pods:
-        container_statuses = p.get('status', {}).get('containerStatuses', [])
-        for status in container_statuses:
-            state = status.get('state', {})
-            if 'waiting' in state:
-                reason = state['waiting'].get('reason', '')
-                if reason in ['CrashLoopBackOff', 'ImagePullBackOff', 'ErrImagePull']:
-                    error_count += 1
-    
-    # Check node conditions
-    node_data = run_command("kubectl get nodes -o json")
-    nodes = json.loads(node_data).get('items', [])
-    pressured_nodes = 0
-    for node in nodes:
-        conditions = node.get('status', {}).get('conditions', [])
-        for c in conditions:
-            # ARM nodes (like PIs) often saturate on DiskPressure (SD Card I/O)
-            if c['type'] in ['MemoryPressure', 'DiskPressure'] and c['status'] == 'True':
-                pressured_nodes += 1
+    with ThreadPoolExecutor(max_workers=SUBMISSION_WORKERS) as executor:
+        try:
+            while time.time() - metrics["start_time"] < TEST_DURATION:
+                # 1. Non-blocking Status Update
+                try:
+                    # List only the essential fields to reduce network/parsing time
+                    jobs = batch_v1.list_namespaced_job(
+                        namespace="default", 
+                        label_selector="benchmark=active",
+                        _continue=None
+                    )
+                    current_items = {j.metadata.name: j.status for j in jobs.items}
+                    
+                    finished = []
+                    for name, (start_t, app_t) in list(active_jobs.items()):
+                        status = current_items.get(name)
+                        if status:
+                            if status.succeeded:
+                                latency = time.time() - start_t
+                                metrics["latencies"][app_t].append(latency)
+                                metrics["total_completed"] += 1
+                                finished.append(name)
+                            elif status.failed:
+                                metrics["errors"] += 1
+                                finished.append(name)
+                        elif name not in current_items:
+                            # Job likely finished and was cleaned up by TTL
+                            finished.append(name)
+                    
+                    for n in finished:
+                        if n in active_jobs: del active_jobs[n]
+                except Exception:
+                    pass
+
+                # 2. Parallel Submission (Non-blocking)
+                needed = CONCURRENCY_TARGET - len(active_jobs)
+                if needed > 0:
+                    import random
+                    # We don't wait for .result() here anymore. 
+                    # We just fire the threads and handle results in the next loop.
+                    num_to_submit = min(needed, SUBMISSION_WORKERS)
+                    futures = [executor.submit(submit_job_task, random.choice(APP_TYPES)) for _ in range(num_to_submit)]
+                    
+                    for f in futures:
+                        # We still need to grab the name to track it, but the threads 
+                        # are already running in parallel.
+                        name, start_t, app_t = f.result() 
+                        if name:
+                            active_jobs[name] = (start_t, app_t)
                 
-    return pressured_nodes > 0, pending_count, error_count
+                elapsed = time.time() - metrics["start_time"]
+                tps = metrics["total_completed"] / elapsed if elapsed > 0 else 0
+                print(f"Elapsed: {int(elapsed)}s | Active: {len(active_jobs)} | Total: {metrics['total_completed']} | TPS: {tps:.2f} j/s", end='\r')
+                
+                # Slower poll to reduce Master CPU contention during the "Database Wall"
+                time.sleep(0.5)
 
-def inject_arm_affinity(data):
-    """Injects nodeSelector to ensure the job lands on ARM nodes."""
-    # Handle both Pods and Controllers (Deployments, Jobs)
-    spec = data.get('spec', {})
-    if 'template' in spec: # Deployment/Job
-        pod_spec = spec['template'].get('spec', {})
-    else: # Naked Pod
-        pod_spec = spec
+        except KeyboardInterrupt:
+            print("\nStopping...")
 
-    if 'nodeSelector' not in pod_spec:
-        pod_spec['nodeSelector'] = {}
-    
-    pod_spec['nodeSelector']['kubernetes.io/arch'] = TARGET_ARCH
-    return data
+    finalize_metrics()
 
-def deploy_wave(wave_num):
-    """Picks a random manifest from the folder and deploys a wave."""
-    manifests = [f for f in os.listdir(MANIFESTS_FOLDER) if f.endswith(('.yaml', '.yml'))]
-    if not manifests:
-        print("No manifests found!")
-        return False
-
-    print(f"\n[Wave {wave_num}] Deploying {WAVE_SIZE} new ARM-targeted jobs...")
-    for i in range(WAVE_SIZE):
-        target = os.path.join(MANIFESTS_FOLDER, manifests[i % len(manifests)])
-        job_name = f"arm-load-{wave_num}-{i}"
-        
-        with open(target, 'r') as f:
-            try:
-                data = yaml.safe_load(f)
-                data['metadata']['name'] = job_name
-                # Ensure the job targets ARM
-                data = inject_arm_affinity(data)
-            except Exception as e:
-                print(f"Failed to parse {target}: {e}")
-                continue
-            
-        with open("temp_deploy.yaml", "w") as f:
-            yaml.dump(data, f)
-            
-        run_command(f"kubectl apply -f temp_deploy.yaml -n {NAMESPACE}")
-    return True
-
-def main():
-    run_command(f"kubectl create namespace {NAMESPACE}")
-    
-    wave = 1
-    while True:
-        is_pressured, pending, errors = get_cluster_status()
-        
-        print(f"Status: {pending} pending, {errors} errors. Pressure: {is_pressured}")
-        
-        if errors > (WAVE_SIZE // 2):
-            print("\n!!! ARCHITECTURE ERROR DETECTED !!!")
-            print("Many pods are failing. Check if your images are built for arm64.")
-            break
-
-        if pending > MAX_PENDING_THRESHOLD or is_pressured:
-            print("\n!!! SATURATION REACHED !!!")
-            print(f"Cluster saturated at Wave {wave-1}.")
-            while True: time.sleep(10)
-            
-        if not deploy_wave(wave):
-            break
-            
-        print(f"Waiting {COOLDOWN_SECONDS}s for ARM scheduler...")
-        time.sleep(COOLDOWN_SECONDS)
-        wave += 1
+def finalize_metrics():
+    total_time = time.time() - metrics["start_time"]
+    total_jobs = metrics["total_completed"]
+    print("\n\n" + "="*60)
+    print("      FINAL PERFORMANCE REPORT")
+    print("="*60)
+    print(f"Overall Throughput: {total_jobs / total_time:.2f} jobs/s")
+    print("-" * 60)
+    print(f"{'App Type':<12} | {'Avg':<8} | {'Min':<8} | {'Max':<8} | {'P95 (s)':<8}")
+    for app in APP_TYPES:
+        lats = sorted(metrics["latencies"][app])
+        if lats:
+            avg, p95 = sum(lats)/len(lats), lats[int(len(lats)*0.95)]
+            print(f"{app:<12} | {avg:<8.2f} | {min(lats):<8.2f} | {max(lats):<8.2f} | {p95:<8.2f}")
+    print("="*60)
+    # Cleanup
+    subprocess.run("kubectl delete jobs -l benchmark=active", shell=True)
 
 if __name__ == "__main__":
-    main()
+    monitor_and_measure()

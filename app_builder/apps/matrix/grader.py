@@ -4,8 +4,8 @@ import random
 import submission
 
 def test_matrix_mult():
-    print("[*] Testing 400x400 Matrix Multiplication...")
-    size = 400
+    print("[*] Testing 700x700 Matrix Multiplication...")
+    size = 700
     m1 = [[random.random() for _ in range(size)] for _ in range(size)]
     m2 = [[random.random() for _ in range(size)] for _ in range(size)]
     
