@@ -352,7 +352,7 @@ class BenchmarkRunner:
                 if self._stop_event.is_set():
                     self._status = "cancelled"
                 else:
-                    grace_seconds = 60.0
+                    grace_seconds = 100.0
                     end_wait = time.time() + grace_seconds
                     # Poll until active jobs clear or timeout
                     while time.time() < end_wait and self.active_jobs and not self._stop_event.is_set():
