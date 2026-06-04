@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cluster SAT Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="backdrop backdrop-a"></div>
+    <div class="backdrop backdrop-b"></div>
+    <main class="shell">
+      <section class="hero card">
+        <div>
+          <p class="eyebrow">cluster_sat</p>
+          <h1>Replay the workload distribution, then watch it hit Kubernetes.</h1>
+          <p class="lede">
+            Paste or upload a CSV trace, compress long idle gaps, and launch a run from the browser.
+          </p>
+        </div>
+        <div class="status-pill" id="health-pill">checking backend…</div>
+      </section>
+
+      <section class="grid">
+        <article class="card panel">
+          <h2>Input Trace</h2>
+          <label class="file-button">
+            <input id="file-input" type="file" accept=".csv,text/csv" />
+            <span>Upload CSV</span>
+          </label>
+          <textarea id="csv-input" spellcheck="false" placeholder="attempt_number,submission_time,runtime_ms,score,active\n1,2026-01-09T09:58:27.049412-08:00,,95,TRUE"></textarea>
+
+          <div class="controls">
+            <label>
+              <span>Scale</span>
+              <input id="scale-input" type="number" min="0.1" step="0.1" value="1.0" />
+            </label>
+            <label>
+              <span>Gap compression (sec)</span>
+              <input id="gap-input" type="number" min="0" step="1" value="300" />
+            </label>
+            <label>
+              <span>Concurrency target</span>
+              <input id="concurrency-input" type="number" min="1" step="1" value="80" />
+            </label>
+          </div>
+
+          <div class="actions">
+            <button id="preview-btn" class="ghost">Preview</button>
+            <button id="run-btn" class="primary">Start run</button>
+            <button id="cancel-btn" class="ghost" disabled>Cancel</button>
+          </div>
+        </article>
+
+        <article class="card panel metrics">
+          <h2>Run Status</h2>
+          <div id="run-meta" class="meta-grid"></div>
+          <div class="progress-wrap">
+            <div class="progress-label">
+              <span>Replay progress</span>
+              <span id="progress-text">0 / 0</span>
+            </div>
+            <div class="progress-bar"><div id="progress-fill"></div></div>
+          </div>
+          <div id="latency-grid" class="stats-grid"></div>
+        </article>
+      </section>
+
+      <section class="grid bottom-grid">
+        <article class="card panel">
+          <h2>Preview</h2>
+          <div id="preview-grid" class="stats-grid"></div>
+          <div id="preview-schedule" class="schedule-list"></div>
+        </article>
+
+        <article class="card panel">
+          <h2>Events</h2>
+          <div id="events" class="events"></div>
+        </article>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
