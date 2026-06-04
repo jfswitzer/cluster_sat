@@ -227,7 +227,7 @@ class BenchmarkRunner:
         start_t = time.time()
         try:
             self._batch_v1.create_namespaced_job(namespace=DEFAULT_NAMESPACE, body=job_obj)
-            return f"b-{job_id}", start_t, app_type, planned_offset
+            return f"b-{job_id}", start_t, app_type, planned_offset, False
         except Exception as exc:
             # If submission failed, attempt to schedule a job that uses the erroring grader image
             self._record_event("submit_error", "failed to create job, attempting error-image fallback", {"error": str(exc)})
@@ -235,10 +235,11 @@ class BenchmarkRunner:
                 fallback_obj = self._get_job_object(self._client, app_type, job_id, image_override=ERROR_IMAGE)
                 self._batch_v1.create_namespaced_job(namespace=DEFAULT_NAMESPACE, body=fallback_obj)
                 self._record_event("submit_fallback", "submitted error-image fallback job", {"job": f"b-{job_id}"})
-                return f"b-{job_id}", start_t, app_type, planned_offset
+                # mark as fallback so it doesn't affect stats
+                return f"b-{job_id}", start_t, app_type, planned_offset, True
             except Exception as exc2:
                 self._record_event("submit_error", "fallback submission also failed", {"error": str(exc2)})
-                return None, None, None, None
+                return None, None, None, None, False
 
     def _poll_status(self) -> None:
         jobs = self._batch_v1.list_namespaced_job(namespace=DEFAULT_NAMESPACE, label_selector="benchmark=active")
@@ -248,7 +249,7 @@ class BenchmarkRunner:
         with self._lock:
             tracked = list(self.active_jobs.items())
 
-        for name, (start_t, app_t, planned_offset) in tracked:
+        for name, (start_t, app_t, planned_offset, is_fallback) in tracked:
             status = current_items.get(name)
             if status:
                 # Some k8s clients expose `succeeded` while others set a Complete condition.
@@ -262,20 +263,24 @@ class BenchmarkRunner:
 
                 if succeeded or complete_condition:
                     latency = time.time() - start_t
-                    with self._lock:
-                        self.metrics["latencies"][app_t].append(latency)
-                        self.metrics["total_completed"] += 1
-                        self.metrics["completion_window"].append(time.time())
-                        # record completion event for time-series graphs
-                        self.metrics["completions"].append({"ts": time.time(), "latency": latency, "app": app_t})
-                        # If we have a planned offset (replay mode), record time from scheduled arrival
-                        if planned_offset is not None and self._started_at is not None:
-                            schedule_latency = time.time() - (self._started_at + planned_offset)
-                            self.metrics["schedule_latencies"][app_t].append(schedule_latency)
+                    # Only update metrics for non-fallback (real) graders
+                    if not is_fallback:
+                        with self._lock:
+                            self.metrics["latencies"][app_t].append(latency)
+                            self.metrics["total_completed"] += 1
+                            self.metrics["completion_window"].append(time.time())
+                            # record completion event for time-series graphs
+                            self.metrics["completions"].append({"ts": time.time(), "latency": latency, "app": app_t})
+                            # If we have a planned offset (replay mode), record time from scheduled arrival
+                            if planned_offset is not None and self._started_at is not None:
+                                schedule_latency = time.time() - (self._started_at + planned_offset)
+                                self.metrics["schedule_latencies"][app_t].append(schedule_latency)
                     finished.append(name)
                 elif failed:
-                    with self._lock:
-                        self.metrics["errors"] += 1
+                    # Only count errors for non-fallback graders
+                    if not is_fallback:
+                        with self._lock:
+                            self.metrics["errors"] += 1
                     finished.append(name)
             elif name not in current_items:
                 finished.append(name)
@@ -338,10 +343,10 @@ class BenchmarkRunner:
                                     planned_offsets = [self.schedule[i]["offset_s"] for i in range(first_idx, schedule_index)]
                                     futures = [executor.submit(self._submit_job_task, random.choice(self.app_types), planned_offsets[i]) for i in range(len(planned_offsets))]
                                     for future in futures:
-                                        name, start_t, app_t, planned_offset = future.result()
+                                        name, start_t, app_t, planned_offset, is_fallback = future.result()
                                         if name:
                                             with self._lock:
-                                                self.active_jobs[name] = (start_t, app_t, planned_offset)
+                                                self.active_jobs[name] = (start_t, app_t, planned_offset, is_fallback)
                                                 self.metrics["submitted"] += 1
                     else:
                         with self._lock:
@@ -351,10 +356,10 @@ class BenchmarkRunner:
                             num_to_submit = min(needed, self.submission_workers)
                             futures = [executor.submit(self._submit_job_task, random.choice(self.app_types), None) for _ in range(num_to_submit)]
                             for future in futures:
-                                name, start_t, app_t, _ = future.result()
+                                name, start_t, app_t, _, is_fallback = future.result()
                                 if name:
                                     with self._lock:
-                                        self.active_jobs[name] = (start_t, app_t, None)
+                                        self.active_jobs[name] = (start_t, app_t, None, is_fallback)
                                         self.metrics["submitted"] += 1
 
                     time.sleep(0.5)
