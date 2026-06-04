@@ -21,8 +21,12 @@ DEFAULT_CONCURRENCY_TARGET = 80
 DEFAULT_TEST_DURATION = 300
 DEFAULT_SUBMISSION_WORKERS = 20
 DEFAULT_GAP_COMPRESSION_SECONDS = 300
-DEFAULT_APP_TYPES = ["matrix"]
-DEFAULT_IMAGE = "docker.io/library/local-grader-matrix:latest"
+DEFAULT_APP_TYPES = ["matrix_small"]
+# Images for different graders
+SMALL_IMAGE = "docker.io/library/local-grader-matrix-small:latest"
+ERROR_IMAGE = "docker.io/library/local-grader-matrix-error:latest"
+# Default image used when app_type doesn't map explicitly
+DEFAULT_IMAGE = SMALL_IMAGE
 DEFAULT_NAMESPACE = "default"
 
 
@@ -195,10 +199,10 @@ class BenchmarkRunner:
         with self._lock:
             self.recent_events.append(payload)
 
-    def _get_job_object(self, client, app_type: str, job_id: int):
+    def _get_job_object(self, client, app_type: str, job_id: int, image_override: Optional[str] = None):
         container = client.V1Container(
             name="grader",
-            image=DEFAULT_IMAGE,
+            image=(image_override or (SMALL_IMAGE if app_type == "matrix_small" else (ERROR_IMAGE if app_type == "matrix_error" else DEFAULT_IMAGE))),
             image_pull_policy="IfNotPresent",
         )
         template = client.V1PodTemplateSpec(
@@ -225,8 +229,16 @@ class BenchmarkRunner:
             self._batch_v1.create_namespaced_job(namespace=DEFAULT_NAMESPACE, body=job_obj)
             return f"b-{job_id}", start_t, app_type, planned_offset
         except Exception as exc:
-            self._record_event("submit_error", "failed to create job", {"error": str(exc)})
-            return None, None, None, None
+            # If submission failed, attempt to schedule a job that uses the erroring grader image
+            self._record_event("submit_error", "failed to create job, attempting error-image fallback", {"error": str(exc)})
+            try:
+                fallback_obj = self._get_job_object(self._client, app_type, job_id, image_override=ERROR_IMAGE)
+                self._batch_v1.create_namespaced_job(namespace=DEFAULT_NAMESPACE, body=fallback_obj)
+                self._record_event("submit_fallback", "submitted error-image fallback job", {"job": f"b-{job_id}"})
+                return f"b-{job_id}", start_t, app_type, planned_offset
+            except Exception as exc2:
+                self._record_event("submit_error", "fallback submission also failed", {"error": str(exc2)})
+                return None, None, None, None
 
     def _poll_status(self) -> None:
         jobs = self._batch_v1.list_namespaced_job(namespace=DEFAULT_NAMESPACE, label_selector="benchmark=active")
