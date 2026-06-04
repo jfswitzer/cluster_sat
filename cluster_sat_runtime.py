@@ -239,7 +239,16 @@ class BenchmarkRunner:
         for name, (start_t, app_t, planned_offset) in tracked:
             status = current_items.get(name)
             if status:
-                if status.succeeded:
+                # Some k8s clients expose `succeeded` while others set a Complete condition.
+                succeeded = getattr(status, "succeeded", None)
+                failed = getattr(status, "failed", None)
+                complete_condition = False
+                if getattr(status, "conditions", None):
+                    for c in status.conditions:
+                        if getattr(c, "type", "") == "Complete" and getattr(c, "status", "") == "True":
+                            complete_condition = True
+
+                if succeeded or complete_condition:
                     latency = time.time() - start_t
                     with self._lock:
                         self.metrics["latencies"][app_t].append(latency)
@@ -252,7 +261,7 @@ class BenchmarkRunner:
                             schedule_latency = time.time() - (self._started_at + planned_offset)
                             self.metrics["schedule_latencies"][app_t].append(schedule_latency)
                     finished.append(name)
-                elif status.failed:
+                elif failed:
                     with self._lock:
                         self.metrics["errors"] += 1
                     finished.append(name)
@@ -338,7 +347,21 @@ class BenchmarkRunner:
 
                     time.sleep(0.5)
 
-                self._status = "completed" if not self._stop_event.is_set() else "cancelled"
+                # After main submission loop exits, give in-flight jobs a short grace period
+                # so their completions are observed and recorded before we mark the run finished.
+                if self._stop_event.is_set():
+                    self._status = "cancelled"
+                else:
+                    grace_seconds = 60.0
+                    end_wait = time.time() + grace_seconds
+                    # Poll until active jobs clear or timeout
+                    while time.time() < end_wait and self.active_jobs and not self._stop_event.is_set():
+                        try:
+                            self._poll_status()
+                        except Exception as exc:
+                            self._record_event("poll_error", "failed to poll job status during grace period", {"error": str(exc)})
+                        time.sleep(0.5)
+                    self._status = "completed" if not self._stop_event.is_set() else "cancelled"
             except KeyboardInterrupt:
                 self._status = "cancelled"
                 self._record_event("cancelled", "run interrupted by user")
