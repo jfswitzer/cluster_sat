@@ -23,8 +23,8 @@ DEFAULT_SUBMISSION_WORKERS = 20
 DEFAULT_GAP_COMPRESSION_SECONDS = 300
 DEFAULT_APP_TYPES = ["matrix_small"]
 # Images for different graders
-SMALL_IMAGE = "docker.io/library/local-grader-matrix-small:latest"
-ERROR_IMAGE = "docker.io/library/local-grader-matrix-error:latest"
+SMALL_IMAGE = "docker.io/nathanrliu/local-grader-matrix-small:latest"
+ERROR_IMAGE = "docker.io/nathanrliu/local-grader-matrix-error:latest"
 # Default image used when app_type doesn't map explicitly
 DEFAULT_IMAGE = SMALL_IMAGE
 DEFAULT_NAMESPACE = "default"

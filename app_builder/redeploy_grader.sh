@@ -7,7 +7,7 @@ HOSTS_FILE="ips.txt"
 PLATFORM="linux/arm64"
 K3S_IMPORT_DIR="/var/lib/rancher/k3s/agent/images"
 # This prefix is vital to match what K3s expects locally
-FULL_IMAGE_NAME="docker.io/library/local-grader-$APP_NAME:latest"
+FULL_IMAGE_NAME="docker.io/nathanrliu/local-grader-$APP_NAME:latest"
 
 if [ -z "$APP_NAME" ]; then
     echo "Usage: ./redeploy_grader.sh <app_name>"
