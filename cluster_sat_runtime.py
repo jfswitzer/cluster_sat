@@ -165,10 +165,13 @@ class BenchmarkRunner:
         self.metrics = {
             "total_completed": 0,
             "latencies": defaultdict(list),
+            "schedule_latencies": defaultdict(list),
             "errors": 0,
             "start_time": None,
             "completion_window": deque(),
             "submitted": 0,
+            # recent completion events for time-series graphs
+            "completions": deque(maxlen=10000),
         }
         self.recent_events = deque(maxlen=50)
 
@@ -214,16 +217,16 @@ class BenchmarkRunner:
             spec=client.V1JobSpec(template=template, backoff_limit=0, ttl_seconds_after_finished=60),
         )
 
-    def _submit_job_task(self, app_type: str):
+    def _submit_job_task(self, app_type: str, planned_offset: Optional[float] = None):
         job_id = int(time.time() * 1000000) % 10000000
         job_obj = self._get_job_object(self._client, app_type, job_id)
         start_t = time.time()
         try:
             self._batch_v1.create_namespaced_job(namespace=DEFAULT_NAMESPACE, body=job_obj)
-            return f"b-{job_id}", start_t, app_type
+            return f"b-{job_id}", start_t, app_type, planned_offset
         except Exception as exc:
             self._record_event("submit_error", "failed to create job", {"error": str(exc)})
-            return None, None, None
+            return None, None, None, None
 
     def _poll_status(self) -> None:
         jobs = self._batch_v1.list_namespaced_job(namespace=DEFAULT_NAMESPACE, label_selector="benchmark=active")
@@ -233,7 +236,7 @@ class BenchmarkRunner:
         with self._lock:
             tracked = list(self.active_jobs.items())
 
-        for name, (start_t, app_t) in tracked:
+        for name, (start_t, app_t, planned_offset) in tracked:
             status = current_items.get(name)
             if status:
                 if status.succeeded:
@@ -242,6 +245,12 @@ class BenchmarkRunner:
                         self.metrics["latencies"][app_t].append(latency)
                         self.metrics["total_completed"] += 1
                         self.metrics["completion_window"].append(time.time())
+                        # record completion event for time-series graphs
+                        self.metrics["completions"].append({"ts": time.time(), "latency": latency, "app": app_t})
+                        # If we have a planned offset (replay mode), record time from scheduled arrival
+                        if planned_offset is not None and self._started_at is not None:
+                            schedule_latency = time.time() - (self._started_at + planned_offset)
+                            self.metrics["schedule_latencies"][app_t].append(schedule_latency)
                     finished.append(name)
                 elif status.failed:
                     with self._lock:
@@ -303,25 +312,28 @@ class BenchmarkRunner:
                             self._replayed_index = schedule_index
 
                         if to_submit > 0:
-                            futures = [executor.submit(self._submit_job_task, random.choice(self.app_types)) for _ in range(to_submit)]
-                            for future in futures:
-                                name, start_t, app_t = future.result()
-                                if name:
-                                    with self._lock:
-                                        self.active_jobs[name] = (start_t, app_t)
-                                        self.metrics["submitted"] += 1
+                                    # Determine which schedule entries we're submitting now
+                                    first_idx = schedule_index - to_submit
+                                    planned_offsets = [self.schedule[i]["offset_s"] for i in range(first_idx, schedule_index)]
+                                    futures = [executor.submit(self._submit_job_task, random.choice(self.app_types), planned_offsets[i]) for i in range(len(planned_offsets))]
+                                    for future in futures:
+                                        name, start_t, app_t, planned_offset = future.result()
+                                        if name:
+                                            with self._lock:
+                                                self.active_jobs[name] = (start_t, app_t, planned_offset)
+                                                self.metrics["submitted"] += 1
                     else:
                         with self._lock:
                             needed = self.concurrency_target - len(self.active_jobs)
 
                         if needed > 0:
                             num_to_submit = min(needed, self.submission_workers)
-                            futures = [executor.submit(self._submit_job_task, random.choice(self.app_types)) for _ in range(num_to_submit)]
+                            futures = [executor.submit(self._submit_job_task, random.choice(self.app_types), None) for _ in range(num_to_submit)]
                             for future in futures:
-                                name, start_t, app_t = future.result()
+                                name, start_t, app_t, _ = future.result()
                                 if name:
                                     with self._lock:
-                                        self.active_jobs[name] = (start_t, app_t)
+                                        self.active_jobs[name] = (start_t, app_t, None)
                                         self.metrics["submitted"] += 1
 
                     time.sleep(0.5)
@@ -361,6 +373,21 @@ class BenchmarkRunner:
             }
         return stats
 
+    def _completion_stats(self) -> Dict[str, float]:
+        # overall completion latency stats (across apps)
+        all_vals = [c["latency"] for c in list(self.metrics["completions"]) ]
+        if not all_vals:
+            return {"avg": 0.0, "min": 0.0, "max": 0.0, "p95": 0.0, "count": 0}
+        vals = sorted(all_vals)
+        p95_index = min(len(vals) - 1, int(len(vals) * 0.95))
+        return {
+            "avg": sum(vals) / len(vals),
+            "min": vals[0],
+            "max": vals[-1],
+            "p95": vals[p95_index],
+            "count": len(vals),
+        }
+
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
             now = time.time()
@@ -396,6 +423,8 @@ class BenchmarkRunner:
                     "compressed_duration_s": self.schedule[-1]["offset_s"] if self.schedule else 0.0,
                 },
                 "latency_stats": self._latency_stats(),
+                "completion_stats": self._completion_stats(),
+                "completions": list(self.metrics["completions"]),
                 "recent_events": list(self.recent_events),
             }
 

@@ -19,6 +19,32 @@ const els = {
 
 let activeRunId = null;
 let pollTimer = null;
+let latencyChart = null;
+
+function initLatencyChart() {
+  const ctx = document.getElementById('latency-chart').getContext('2d');
+  latencyChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        label: 'Time-to-complete (s)',
+        data: [],
+        borderColor: '#6C5CE7',
+        backgroundColor: 'rgba(108,92,231,0.08)',
+        pointRadius: 2,
+        tension: 0.1,
+      }]
+    },
+    options: {
+      scales: {
+        x: { type: 'category', title: { display: true, text: 'Time' } },
+        y: { title: { display: true, text: 'Seconds' } }
+      },
+      plugins: { legend: { display: true } },
+    }
+  });
+}
 
 function metric(label, value, subvalue = '') {
   return `
@@ -107,6 +133,19 @@ function renderRun(snapshot, runId) {
   els.cancelBtn.disabled = snapshot.status !== 'running';
   if (snapshot.status === 'completed' || snapshot.status === 'failed' || snapshot.status === 'cancelled') {
     stopPolling();
+  }
+
+  // Update latency chart with recent completions
+  try {
+    if (!latencyChart) initLatencyChart();
+    const completions = snapshot.completions || [];
+    const labels = completions.map(c => new Date(c.ts * 1000).toLocaleTimeString());
+    const points = completions.map(c => c.latency);
+    latencyChart.data.labels = labels;
+    latencyChart.data.datasets[0].data = points;
+    latencyChart.update('none');
+  } catch (err) {
+    // ignore chart failures
   }
 }
 
